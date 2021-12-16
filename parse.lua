@@ -22,6 +22,15 @@ local function read_file(path, descr)
    return contents
 end
 
+-- получение строки даты
+
+local function timeset(day,month,year)
+	if year then 
+		return year..'-'..month..'-'..day
+	end
+	return nil	
+end
+
 -- сохранение в БД
 
 local function save_record(data) 
@@ -44,15 +53,38 @@ local function save_record(data)
 	end 	
 	cur:fetch(results)	
 	if results[2]==nil then	
-		cur = assert (con:execute("INSERT INTO posts(tg_id,parent_id,addon_id,date,user,replyto,text,photo,media) VALUES("..data["tg_id"]..","..data["parent_id"]..","..data["addon_id"]..",STR_TO_DATE('"..data["date"].."','%d.%m.%Y %H:%i:%s'),"..user_id..","..data["replyto"]..",'"..data["text"].."','"..data["photo"].."','"..data["media"].."')"))
+		cur = assert (con:execute("INSERT INTO posts(tg_id,parent_id,addon_id,date,user,replyto,text,photo,media,dataset_id) VALUES("..data["tg_id"]..","..data["parent_id"]..","..data["addon_id"]..",STR_TO_DATE('"..data["date"].."','%d.%m.%Y %H:%i:%s'),"..user_id..","..data["replyto"]..",'"..data["text"].."','"..data["photo"].."','"..data["media"].."','"..data["dataset_id"].."')"))
 	end	
+end
+
+-- получение id датасета| вставка датасета с получением id, пытаемся также получить дату из названия папки
+
+local function get_dataset(dir)
+	local results = {}	
+	local year,month,day = string.match(dir, ".*(%d%d%d%d).(%d%d).(%d%d).*")
+	local times = nil
+	times = timeset(day,month,year)
+	if not times then 
+		day,month,year = string.match(dir, ".*(%d%d).(%d%d).(%d%d%d%d).*")
+		times = timeset(day,month,year)
+	end
+	if not times then times = '2000-01-01' end
+	local cursor = assert (con:execute("SELECT id FROM datasets WHERE name =('" ..dir.."')"))	
+	cursor:fetch(results)
+	if not results[1] then 
+		cursor = assert (con:execute("INSERT INTO datasets(name, time) VALUES ('" ..dir.."',STR_TO_DATE('"..times.."','%Y-%m-%d'))")) 
+		cursor = assert (con:execute("SELECT LAST_INSERT_ID()"))
+		cursor:fetch(results)						
+	end
+	return results[1]
 end
 
 -- сохранение вложенных сообщений
 
-local function check_addons(parent_id)
+local function check_addons(parent_id,dataset_id)
 	local index = 1
 	while index<deep and message_table[index] do		  
+		message_table[index]["dataset_id"] = dataset_id
 		message_table[index]["parent_id"] = parent_id
 		message_table[index]["addon_id"] = index
 		save_record(message_table[index])
@@ -62,10 +94,11 @@ end
 
 -- сохранение основного сообщения
 
-local function save_sql() 
+local function save_sql(dataset_id) 
 	local main_record = table.maxn(message_table)
-	if (main_record) then
-		check_addons(main_record)		
+	if (main_record) then				
+		check_addons(main_record,dataset_id)				
+		message_table[main_record]["dataset_id"] = dataset_id
 		message_table[main_record]["tg_id"] = main_record
 		save_record(message_table[main_record])
 	end
@@ -123,7 +156,7 @@ end
 
 -- парсинг сообщения
 
-local function parse_message(message)
+local function parse_message(message,dataset_id)
 	message_table = {}
 	local id = message.attributes['id']		
 	if not string.find(id,"-") then
@@ -131,7 +164,7 @@ local function parse_message(message)
 		id = tonumber(id)			
 		if (id) then	
 			parse_nodes(message.nodes,id)
-			save_sql()
+			save_sql(dataset_id)
 		else 
 			print ('Ошибка получения id сообщения из файла')
 		end
@@ -141,17 +174,24 @@ end
 
 -- проход файлов
 
-for entry in lfs.dir("./temp/") do
-  local mode = lfs.attributes("./temp/" .. entry, "mode")
-  if (mode == "file") then
-    print('Обрабатывается файл: '..entry, mode)
-    local content = read_file("./temp/" .. entry, entry)
-    local root = htmlparser.parse(content)
-    local messages = root:select(".message")
-    for _, message in ipairs(messages) do		
-		parse_message(message)
-    end
-  end
+local function dirs(dir)
+	local dataset_id = get_dataset(dir)	
+	for entry in lfs.dir(dir) do
+		local mode = lfs.attributes(dir.."/" .. entry, "mode")
+		if mode == "file" and string.find(entry,".+\.html$") then			
+			print('Обрабатывается файл: '..dir.."/"..entry)			
+			local content = read_file(dir.."/" .. entry, entry)
+			local root = htmlparser.parse(content)
+			local messages = root:select(".message")
+			for _, message in ipairs(messages) do		
+				parse_message(message,dataset_id)
+			end
+		else		
+			if (mode == "directory") and not (entry == ".") and not (entry == "..")  then
+				dirs(dir.."/" .. entry) 	
+			end
+		end  
+	end
 end
 
 -- печать DOM-дерева выбранного элемента
@@ -167,6 +207,8 @@ local function p(n)
     p(v)
   end
 end
+
+dirs("./temp")
 
 con:close()
 env:close()
